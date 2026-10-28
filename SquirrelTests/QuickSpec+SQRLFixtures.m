@@ -11,6 +11,7 @@
 #import "SQRLCodeSignature.h"
 #import "SQRLDirectoryManager.h"
 #import "SQRLInstaller.h"
+#import "SQRLInstaller+Private.h"
 #import "SQRLShipItLauncher.h"
 #import "SQRLShipItRequest.h"
 #import <ServiceManagement/ServiceManagement.h>
@@ -365,6 +366,11 @@ static NSNumber *SQRLShipItLastExitStatus(NSString *jobLabel) {
 		BOOL installed = [[installer.installUpdateCommand execute:request] asynchronouslyWaitUntilCompleted:&installedError];
 		expect(@(installed)).to(beTruthy());
 		expect(installedError).to(beNil());
+		if ([installer isEarlyStagingEnabled]) {
+			BOOL cleaned = [[installer cleanupAfterInstallation] asynchronouslyWaitUntilCompleted:&installedError];
+			expect(@(cleaned)).to(beTruthy());
+			expect(installedError).to(beNil());
+		}
 	}
 }
 

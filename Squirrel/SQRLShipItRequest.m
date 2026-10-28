@@ -10,6 +10,7 @@
 
 #import <ReactiveObjC/EXTKeyPathCoding.h>
 #import <ReactiveObjC/RACSignal+Operations.h>
+#import <ReactiveObjC/RACScheduler.h>
 
 NSString * const SQRLShipItRequestErrorDomain = @"SQRLShipItRequestErrorDomain";
 
@@ -66,7 +67,53 @@ NSString * const SQRLShipItRequestPropertyErrorKey = @"SQRLShipItRequestProperty
 		@keypath(SQRLShipItRequest.new, bundleIdentifier): @keypath(SQRLShipItRequest.new, bundleIdentifier),
 		@keypath(SQRLShipItRequest.new, launchAfterInstallation): @keypath(SQRLShipItRequest.new, launchAfterInstallation),
 		@keypath(SQRLShipItRequest.new, useUpdateBundleName): @keypath(SQRLShipItRequest.new, useUpdateBundleName),
+		@keypath(SQRLShipItRequest.new, prepared): @keypath(SQRLShipItRequest.new, prepared),
+		@keypath(SQRLShipItRequest.new, preparationError): @keypath(SQRLShipItRequest.new, preparationError),
 	};
+}
+
+- (BOOL)matchesPreparedRequest:(SQRLShipItRequest *)request {
+	if (request == nil) return NO;
+	return [self.updateBundleURL isEqual:request.updateBundleURL] &&
+		[self.targetBundleURL isEqual:request.targetBundleURL] &&
+		(self.bundleIdentifier == request.bundleIdentifier || [self.bundleIdentifier isEqual:request.bundleIdentifier]) &&
+		self.useUpdateBundleName == request.useUpdateBundleName;
+}
+
+- (RACSignal *)writePreparationResult:(NSError *)error usingURL:(RACSignal *)stateURL {
+	return [[SQRLShipItRequest
+		readUsingURL:stateURL]
+		flattenMap:^(SQRLShipItRequest *currentRequest) {
+			if (![self matchesPreparedRequest:currentRequest]) return [RACSignal empty];
+			NSMutableDictionary *values = [currentRequest.dictionaryValue mutableCopy];
+			values[@keypath(self.prepared)] = @(error == nil);
+			values[@keypath(self.preparationError)] = error.localizedDescription ?: NSNull.null;
+			NSError *modelError = nil;
+			SQRLShipItRequest *updated = [[SQRLShipItRequest alloc] initWithDictionary:values error:&modelError];
+			if (updated == nil) return [RACSignal error:modelError];
+			return [updated writeUsingURL:stateURL];
+		}];
+}
+
+- (RACSignal *)waitForPreparationUsingURL:(RACSignal *)stateURL {
+	RACScheduler *scheduler = [RACScheduler scheduler];
+	return [[[[[[RACSignal interval:0.1 onScheduler:scheduler]
+		startWith:NSDate.date]
+		flattenMap:^(id _) {
+			return [[SQRLShipItRequest readUsingURL:stateURL] catchTo:[RACSignal empty]];
+		}]
+		flattenMap:^(SQRLShipItRequest *currentRequest) {
+			if (![self matchesPreparedRequest:currentRequest]) return [RACSignal empty];
+			if (currentRequest.preparationError != nil) {
+				return [RACSignal error:[NSError errorWithDomain:SQRLShipItRequestErrorDomain code:SQRLShipItRequestErrorUnarchiving userInfo:@{ NSLocalizedDescriptionKey: currentRequest.preparationError }]];
+			}
+			if (currentRequest.prepared.boolValue) {
+				return [RACSignal return:currentRequest];
+			}
+			return [RACSignal empty];
+		}]
+		take:1]
+		timeout:300 onScheduler:scheduler];
 }
 
 + (NSValueTransformer *)updateBundleURLJSONTransformer {

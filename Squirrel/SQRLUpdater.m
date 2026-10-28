@@ -1080,11 +1080,21 @@ BOOL isVersionStandard(NSString* version) {
 			BOOL useUpdateBundleName = [appBundle.sqrl_executableName isEqual:targetBundleURL.lastPathComponent.stringByDeletingPathExtension];
 
 			SQRLShipItRequest *request = [[SQRLShipItRequest alloc] initWithUpdateBundleURL:update.bundle.bundleURL targetBundleURL:targetBundleURL bundleIdentifier:currentApplication.bundleIdentifier launchAfterInstallation:NO useUpdateBundleName:useUpdateBundleName];
-			return [request writeUsingURL:self.shipItStateURL];
+			if (![[NSUserDefaults standardUserDefaults] boolForKey:@"SquirrelMacEnableEarlyStaging"]) {
+				return [[request writeUsingURL:self.shipItStateURL] then:^{
+					return self.shipItLauncher;
+				}];
+			}
+
+			return [[[request writeUsingURL:self.shipItStateURL]
+				concat:[RACSignal return:request]]
+				flattenMap:^(SQRLShipItRequest *request) {
+					return [self.shipItLauncher then:^{
+						return [request waitForPreparationUsingURL:self.shipItStateURL];
+					}];
+				}];
 		}]
-		then:^{
-			return self.shipItLauncher;
-		}]
+		ignoreValues]
 		sqrl_addTransactionWithName:NSLocalizedString(@"Preparing update", nil) description:NSLocalizedString(@"An update for %@ is being prepared. Interrupting the process could corrupt the application.", nil), NSRunningApplication.currentApplication.bundleIdentifier]
 		setNameWithFormat:@"%@ -prepareUpdateForInstallation: %@", self, update];
 }
@@ -1093,7 +1103,9 @@ BOOL isVersionStandard(NSString* version) {
 	return [[[[[[[[SQRLShipItRequest
 		readUsingURL:self.shipItStateURL]
 		map:^(SQRLShipItRequest *request) {
-			return [[SQRLShipItRequest alloc] initWithUpdateBundleURL:request.updateBundleURL targetBundleURL:request.targetBundleURL bundleIdentifier:request.bundleIdentifier launchAfterInstallation:YES useUpdateBundleName:request.useUpdateBundleName];
+			NSMutableDictionary *values = [request.dictionaryValue mutableCopy];
+			values[@"launchAfterInstallation"] = @YES;
+			return [[SQRLShipItRequest alloc] initWithDictionary:values error:NULL];
 		}]
 		flattenMap:^(SQRLShipItRequest *request) {
 			return [[request

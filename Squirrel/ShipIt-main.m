@@ -114,16 +114,54 @@ static RACSignal *restoreOwnedBundle(SQRLInstaller *installer) {
 		setNameWithFormat:@"restoreOwnedBundle"];
 }
 
-static void installRequest(RACSignal *readRequestSignal, NSString *applicationIdentifier) {
+static void installRequest(NSURL *stateURL, NSString *applicationIdentifier) {
 	SQRLInstaller *installer = [[SQRLInstaller alloc] initWithApplicationIdentifier:applicationIdentifier];
+	RACSignal *readRequestSignal = [SQRLShipItRequest readUsingURL:[RACSignal return:stateURL]];
 
-	[[[[[[restoreOwnedBundle(installer)
-		concat:readRequestSignal]
-		flattenMap:^(SQRLShipItRequest *request) {
-			return waitForTerminationIfNecessary(request);
-		}]
-		ignoreValues]
-		concat:readRequestSignal]
+	RACSignal *readyToInstall;
+	if ([installer isEarlyStagingEnabled]) {
+		RACScheduler *preparationScheduler = [RACScheduler schedulerWithPriority:RACSchedulerPriorityLow];
+		RACSignal *requests = [[[[[[RACSignal interval:0.5 onScheduler:preparationScheduler]
+			startWith:NSDate.date]
+			flattenMap:^(id _) {
+				return readRequestSignal;
+			}]
+			map:^(SQRLShipItRequest *request) {
+				return [[SQRLShipItRequest alloc] initWithUpdateBundleURL:request.updateBundleURL targetBundleURL:request.targetBundleURL bundleIdentifier:request.bundleIdentifier launchAfterInstallation:NO useUpdateBundleName:request.useUpdateBundleName];
+			}]
+			distinctUntilChanged]
+			deliverOn:preparationScheduler];
+
+		readyToInstall = [[[requests
+			map:^(SQRLShipItRequest *request) {
+				__block NSError *preparationError = nil;
+				RACSignal *preparing = [[[installer prepareRequest:request]
+					catch:^(NSError *error) {
+						preparationError = error;
+						NSLog(@"Preparation failed: %@", error.sqrl_verboseDescription);
+						return [RACSignal empty];
+					}]
+					ignoreValues];
+				return [[[[preparing then:^{
+					return [request writePreparationResult:preparationError usingURL:[RACSignal return:stateURL]];
+				}]
+					concat:[waitForTerminationIfNecessary(request) ignoreValues]]
+					concat:readRequestSignal]
+					deliverOn:preparationScheduler];
+			}]
+			switchToLatest]
+			take:1];
+	} else {
+		readyToInstall = [[[readRequestSignal
+			flattenMap:^(SQRLShipItRequest *request) {
+				return waitForTerminationIfNecessary(request);
+			}]
+			ignoreValues]
+			concat:readRequestSignal];
+	}
+
+	[[[restoreOwnedBundle(installer)
+		concat:readyToInstall]
 		flattenMap:^(SQRLShipItRequest *request) {
 			NSUInteger attempt = installationAttempts(applicationIdentifier) + 1;
 			setInstallationAttempts(applicationIdentifier, attempt);
@@ -133,6 +171,7 @@ static void installRequest(RACSignal *readRequestSignal, NSString *applicationId
 			BOOL updateMissing = ![request.updateBundleURL checkResourceIsReachableAndReturnError:NULL];
 
 			RACSignal *action;
+			__block BOOL launched = !request.launchAfterInstallation;
 			if (updateMissing || attempt > SQRLShipItMaximumInstallationAttempts) {
 				action = [[[[installer.abortInstallationCommand
 					execute:request]
@@ -218,7 +257,8 @@ static void installRequest(RACSignal *readRequestSignal, NSString *applicationId
 								NSLog(@"New ShipIt pid: %i", pid);
 								do {
 									if (waitpid(pid, &status, 0) != -1) {
-										NSLog(@"ShipIt status %d", WEXITSTATUS(status));
+										launched = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+										NSLog(@"ShipIt launch succeeded: %d", launched);
 									} else {
 										perror("waitpid");
 										exit(1);
@@ -243,11 +283,28 @@ static void installRequest(RACSignal *readRequestSignal, NSString *applicationId
 #pragma clang diagnostic pop
 
 							NSLog(@"Application launched at %@", bundleURL);
+							launched = YES;
 						}
 					}];
 			}
 
-			return action;
+			// deliverOn above ensures launch handling runs before this
+			// subscription starts recursive cleanup.
+			if (![installer isEarlyStagingEnabled]) {
+				return action;
+			}
+			return [action concat:[RACSignal defer:^{
+				if (!launched) {
+					NSLog(@"Application launch failed; retaining obsolete bundles for later cleanup");
+					return [RACSignal empty];
+				}
+				return [[[installer cleanupAfterInstallation]
+					subscribeOn:[RACScheduler schedulerWithPriority:RACSchedulerPriorityBackground]]
+					catch:^(NSError *error) {
+						NSLog(@"Deferred cleanup failed; retained for next ShipIt run: %@", error.sqrl_verboseDescription);
+						return [RACSignal empty];
+					}];
+			}]];
 		}]
 		subscribeError:^(NSError *error) {
 			if ([[error domain] isEqual:SQRLInstallerErrorDomain] && [error code] == SQRLInstallerErrorAppStillRunning) {
@@ -301,6 +358,7 @@ int main(int argc, const char * argv[]) {
 			NSError *error;
 			if (![NSWorkspace.sharedWorkspace launchApplicationAtURL:shipItStateURL options:NSWorkspaceLaunchDefault configuration:@{} error:&error]) {
 				NSLog(@"Could not launch application at %@: %@", shipItStateURL, error);
+				return EXIT_FAILURE;
 			} else {
 				NSLog(@"Successfully launched application at %@", shipItStateURL);
 			}
@@ -308,7 +366,7 @@ int main(int argc, const char * argv[]) {
 			exit(EXIT_SUCCESS);
 		} else {
 			NSLog(@"Detected this as an install request");
-			installRequest([SQRLShipItRequest readUsingURL:[RACSignal return:shipItStateURL]], @(jobLabel));
+			installRequest(shipItStateURL, @(jobLabel));
 			dispatch_main();
 		}
 	}

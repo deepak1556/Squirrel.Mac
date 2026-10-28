@@ -97,4 +97,18 @@ extern NSString * const SQRLShipItRequestPropertyErrorKey;
 // Whether the app should use the update bundle's name.
 @property (nonatomic, assign, readonly) BOOL useUpdateBundleName;
 
+// Compares all installation fields, excluding launchAfterInstallation and
+// preparation status.
+- (BOOL)matchesPreparedRequest:(SQRLShipItRequest *)request;
+
+// Whether ShipIt has finished early staging for this request.
+@property (nonatomic, copy, readonly) NSNumber *prepared;
+
+// Any error encountered during early staging for this request.
+@property (nonatomic, copy, readonly) NSString *preparationError;
+
+// The result is a readiness notification, never an installation trust anchor.
+- (RACSignal *)writePreparationResult:(NSError *)error usingURL:(RACSignal *)stateURL;
+- (RACSignal *)waitForPreparationUsingURL:(RACSignal *)stateURL;
+
 @end

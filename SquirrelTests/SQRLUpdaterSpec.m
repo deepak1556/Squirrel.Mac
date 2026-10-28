@@ -16,7 +16,6 @@
 
 #import "SQRLDirectoryManager.h"
 #import "SQRLShipItLauncher.h"
-#import "SQRLUpdater.h"
 #import "SQRLZipArchiver.h"
 
 #import "OHHTTPStubs/OHHTTPStubs.h"
